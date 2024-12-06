@@ -1,0 +1,327 @@
+---
+title: "HC_WorkTrialTasks"
+output: pdf_document
+date: "2024-12-03"
+---
+
+# Work Trial Tasks
+## Hansoo Chang
+## December 3, 2024
+
+
+# Read in Data and libraries
+```{r}
+# Change directory based on location of data
+df <- read.csv("/Users/hansoochang/Downloads/merged_data.csv")
+
+library(dplyr)
+library(ggplot2)
+library(torch)
+
+
+```
+
+
+# 1. Task: Paper replication
+Construct and code the linear OW model and nonlinear AFS model, and visualize the distri-
+bution of price impact based on the given data. (33 pt)
+```{r}
+df <- df %>% mutate(trade_size = Signed.Volume)
+
+```
+
+## Linear OW Model
+```{r}
+# trade_sizes: vector of trade sizes 
+# lambda: impact intensity
+# beta: rate of exponential decary
+# time_steps: represents time
+
+linear_ow_model <- function(trade_sizes, lambda, beta, time_steps) {
+  n <- length(trade_sizes)
+  impacts <- numeric(n)  # Initialize impacts vector
+  for (t in 2:n) {
+    impacts[t] <- lambda * sum(trade_sizes[1:(t-1)] * exp(-beta * (time_steps[t] - 
+                                                                     time_steps[1:(t-1)])))
+  }
+  return(impacts)
+}
+
+
+```
+
+
+## Nonlinear AFS Model
+```{r}
+# Same arguments as above
+
+nonlinear_afs_model <- function(trade_sizes, lambda, beta, p, time_steps) {
+  n <- length(trade_sizes)
+  impacts <- numeric(n)  # Initialize impacts vector
+  for (t in 2:n) {
+    impacts[t] <- lambda * sum((abs(trade_sizes[1:(t-1)])^p) * sign(trade_sizes[1:(t-1)]) * 
+                                 exp(-beta * (time_steps[t] - time_steps[1:(t-1)])))
+  }
+  return(impacts)
+}
+```
+
+
+## Generate time steps
+Acts as a proxy for time. Assumes that trades are equally spaced in time.
+```{r}
+time_steps <- seq_len(nrow(df))
+```
+
+## Compute Impacts
+```{r}
+# Tried to use realistic parameters based on the paper
+lambda <- 0.0035 # section 6.1 
+beta <- 2.0 
+p <- 0.5
+
+# Calculate impacts
+linear_impacts <- linear_ow_model(df$trade_size, lambda, beta, time_steps)
+nonlinear_impacts <- nonlinear_afs_model(df$trade_size, lambda, beta, p, time_steps)
+
+
+```
+
+## Visualize Distribution
+```{r}
+# Combine impacts into a data frame for plotting
+impact_data <- data.frame(
+  Impact = c(linear_impacts, nonlinear_impacts),
+  Model = rep(c("Linear OW", "Nonlinear AFS"), each = length(linear_impacts))
+)
+
+# Plot
+ggplot(impact_data %>% filter(Impact > -200), aes(x = Impact, fill = Model)) +
+  geom_histogram(bins = 50, alpha = 0.5, position = "identity") +
+  labs(
+    title = "Distribution of Price Impacts",
+    x = "Impact",
+    y = "Density"
+  ) +
+  xlim(-25, 25) +
+  theme_minimal() +
+  scale_fill_manual(values = c("Linear OW" = "blue", "Nonlinear AFS" = "orange")) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),# Center title and increase font size
+    axis.title = element_text(size = 14),             # Increase axis title font size
+    axis.text = element_text(size = 12)               # Increase axis text font size
+  )
+
+# Outlier. Large trade size/ Signed Volume
+df %>% filter(abs(linear_impacts) > 25)
+
+```
+
+
+
+
+# 2. Task: Paper Replication
+Implement and code the optimal strategy with Linear Impact and visualize the Sharpe Ratio
+plots in Section 6.2. (33 pt)
+
+## Define Feedback Trading Strategy
+```{r}
+optimal_strategy <- function(mid_prices, signed_volumes, lambda, beta) {
+  n <- length(mid_prices)
+  trades <- numeric(n)  # Initialize trade sizes
+  impacts <- numeric(n)  # Initialize impacts
+
+  for (t in 2:n) {  # Start from t = 2
+    # Calculate cumulative impact up to time t
+    if (t > 1) {
+      impacts[t] <- lambda * sum(trades[1:(t - 1)] * exp(-beta * (t - 1:(t - 1))))
+    } else {
+      impacts[t] <- 0  # No past trades for t = 1
+    }
+
+    # Optimal trade size based on feedback control
+    trades[t] <- -0.5 * (mid_prices[t] + impacts[t])
+  }
+
+  return(trades)
+}
+
+```
+
+
+## Compute Realized Returns
+```{r}
+trades <- optimal_strategy(df$mid_price, df$Signed.Volume, lambda, beta)
+
+realized_returns <- -trades * diff(c(0, df$mid_price))
+
+```
+
+
+## Compute Sharpe Ratio
+```{r}
+compute_sharpe_ratio <- function(returns) {
+  mean(returns) / sd(returns)  # Sharpe ratio formula
+}
+
+sharpe_ratio <- compute_sharpe_ratio(realized_returns)
+sharpe_ratio
+```
+
+## Visualize
+This take a while to run, so the parameter grid is relatively small
+```{r}
+lambda_values <- seq(0.001, 0.01, length.out = 3)
+beta_values <- seq(1, 5, length.out = 3)
+
+# Create a grid of all combinations of lambda and beta
+param_grid <- expand.grid(lambda = lambda_values, beta = beta_values)
+
+sharpe_results <- param_grid
+
+sharpe_results$sharpe <- mapply(function(lambda, beta) {
+  trades <- optimal_strategy(df$mid_price, df$Signed.volume, lambda, beta)
+  realized_returns <- -trades * diff(c(0, df$mid_price))
+  mean(realized_returns) / sd(realized_returns)
+}, lambda = param_grid$lambda, beta = param_grid$beta)
+
+
+
+# Sharpe Ratio Contour Plot
+ggplot(sharpe_results, aes(x = lambda, y = beta, z = sharpe)) +
+  geom_contour_filled() +  # Filled contours for Sharpe Ratios
+  scale_fill_viridis_d(name = "Sharpe Ratio") +  # Better color palette
+  labs(
+    title = "Sharpe Ratio Across Parameters",
+    x = expression(lambda ~ "(Impact Intensity)"),
+    y = expression(beta ~ "(Decay Rate)")
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5), # Center and enlarge title
+    axis.title = element_text(size = 14),             # Enlarge axis titles
+    axis.text = element_text(size = 12),              # Enlarge axis labels
+    legend.title = element_text(size = 12),           # Enlarge legend title
+    legend.text = element_text(size = 10)             # Enlarge legend text
+  )
+
+```
+
+# Task: Paper Replication
+Implement and code the Deep Learning Algorithm in for discrete setting in Appendix C.2
+and visualize the training loss for different network structures in Appendix C.2. (33 pt)
+
+## Prepare Data
+```{r}
+# Prepare features (X) and targets (y)
+features <- data.frame(
+  mid_price = df$mid_price[-1],  # Remove first row due to lagged differences
+  price_change = diff(df$mid_price),
+  trade_size = df$Signed.Volume[-1]
+)
+
+# Target (y): Trade sizes (generated using optimal strategy)
+lambda <- 0.0035
+beta <- 2.0
+target <- optimal_strategy(df$mid_price, df$Signed.volume, lambda, beta)[-1]  # Exclude first row
+
+# Convert to torch tensors
+X <- torch_tensor(as.matrix(features), dtype = torch_float())
+y <- torch_tensor(as.numeric(target), dtype = torch_float())
+
+```
+
+
+## Define Neural Network
+```{r}
+# Define the neural network model
+net <- nn_module(
+  "TradingNet",
+  initialize = function(input_size, hidden_size, output_size) {
+    self$fc1 <- nn_linear(input_size, hidden_size)
+    self$fc2 <- nn_linear(hidden_size, output_size)
+    self$relu <- nn_relu()
+  },
+  forward = function(x) {
+    x <- self$relu(self$fc1(x))
+    x <- self$fc2(x)
+    return(x)
+  }
+)
+
+# Initialize the network
+input_size <- ncol(features)  # Number of features
+hidden_size <- 32            # Number of hidden neurons
+output_size <- 1             # Single output (trade size)
+model <- net(input_size, hidden_size, output_size)
+
+
+```
+
+## Define training Loop
+```{r, warning = FALSE}
+
+# Loss function and optimizer
+criterion <- nn_mse_loss()
+optimizer <- optim_adam(model$parameters, lr = 0.001)
+
+# Training loop
+num_epochs <- 100
+losses <- numeric(num_epochs)
+
+for (epoch in seq_len(num_epochs)) {
+  optimizer$zero_grad()
+  
+  # Forward pass
+  predictions <- model(X)
+  loss <- criterion(predictions, y)
+  
+  # Backward pass and optimization
+  loss$backward()
+  optimizer$step()
+  
+  # Record the loss
+  losses[epoch] <- loss$item()
+  
+  # Print progress
+  if (epoch %% 10 == 0) {
+    cat(sprintf("Epoch %d, Loss: %.4f\n", epoch, losses[epoch]))
+  }
+}
+
+
+```
+
+## Visualize training loss
+```{r}
+# Visualize training loss
+loss_data <- data.frame(Epoch = seq_len(num_epochs), Loss = losses)
+
+ggplot(loss_data, aes(x = Epoch, y = Loss)) +
+  geom_line(color = "blue") +
+  labs(
+    title = "Training Loss Over Epochs",
+    x = "Epoch",
+    y = "Loss"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12)
+  )
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
